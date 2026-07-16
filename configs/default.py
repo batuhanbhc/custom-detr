@@ -6,7 +6,7 @@ with command-line flags in ``train.py``.
 from pathlib import Path
 
 # Data
-data_root = Path("/data")
+data_root = Path(__file__).resolve().parents[1] / "data" / "coco"
 train_images = data_root / "train2017"
 val_images = data_root / "val2017"
 train_annotations = data_root / "annotations/instances_train2017.json"
