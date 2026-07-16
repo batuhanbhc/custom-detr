@@ -81,7 +81,7 @@ class UncertaintyMinimalQuery(nn.Module):
         topk_boxes = topk_box_logits.sigmoid()
 
         return {
-            "memory": flat_memory,
+            "memory": memory_output,
 
             # Decoder initialization: detached
             "query_tokens": query_tokens.detach(),

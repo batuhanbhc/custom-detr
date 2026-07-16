@@ -5,6 +5,7 @@ from .backbone import ResNetBackbone
 from .encoder import HybridEncoder
 from .query_selection import UncertaintyMinimalQuery
 from .decoder import Decoder
+from .denoising import build_cdn
 import configs.default as cfg
 
 
@@ -44,6 +45,7 @@ class CustomDETR(nn.Module):
             ffn_dropout=cfg.decoder_ffn_dropout,
             msa_dropout=cfg.decoder_msa_dropout,
         )
+        self.denoising_class_embed = nn.Embedding(cfg.num_class + 1, cfg.d_model, padding_idx=cfg.num_class)
 
     @staticmethod
     def build_spatial_metadata(features):
@@ -89,7 +91,7 @@ class CustomDETR(nn.Module):
 
         return spatial_sizes, level_start_index
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, targets=None):
         backbone_features = self.backbone(x)
 
         encoder_features = self.encoder(backbone_features)
@@ -106,29 +108,42 @@ class CustomDETR(nn.Module):
             encoder_features
         )
 
+        dn_tokens = dn_boxes = attn_mask = dn_meta = None
+        if self.training and targets is not None and cfg.num_denoising > 0:
+            dn_tokens, dn_boxes, attn_mask, dn_meta = build_cdn(
+                targets, cfg.num_class, cfg.top_k, self.denoising_class_embed,
+                cfg.num_denoising, cfg.label_noise_ratio, cfg.box_noise_scale)
+        query_tokens = query_output["query_tokens"]
+        reference_logits = query_output["reference_box_logits"]
+        if dn_tokens is not None:
+            query_tokens = torch.cat((dn_tokens, query_tokens), dim=1)
+            reference_logits = torch.cat((dn_boxes, reference_logits), dim=1)
         decoder_output = self.decoder(
-            query_tokens=query_output["query_tokens"],
+            query_tokens=query_tokens,
             memory=query_output["memory"],
-            reference_box_logits=query_output[
-                "reference_box_logits"
-            ],
+            reference_box_logits=reference_logits,
             spatial_sizes=spatial_sizes,
             level_start_index=level_start_index,
-            attn_mask=None,
+            attn_mask=attn_mask,
         )
+
+        split = dn_meta["dn_num_split"][0] if dn_meta is not None else 0
+        dec_logits = decoder_output["all_class_logits"]
+        dec_boxes = decoder_output["all_pred_boxes"]
+        match_logits, match_boxes = dec_logits[:, :, split:], dec_boxes[:, :, split:]
 
         return {
             # Final decoder output
-            "pred_logits": decoder_output["pred_logits"],
-            "pred_boxes": decoder_output["pred_boxes"],
+            "pred_logits": match_logits[:, -1],
+            "pred_boxes": match_boxes[:, -1],
 
             # All decoder layers, including final layer
             "decoder_class_logits": decoder_output[
                 "all_class_logits"
-            ],
+            ][:, :, split:],
             "decoder_boxes": decoder_output[
                 "all_pred_boxes"
-            ],
+            ][:, :, split:],
 
             # Encoder top-k auxiliary predictions
             "enc_topk_class_logits": query_output[
@@ -142,5 +157,7 @@ class CustomDETR(nn.Module):
             "topk_indices": query_output["topk_indices"],
             "spatial_sizes": spatial_sizes,
             "level_start_index": level_start_index,
+            "dn_meta": dn_meta,
+            "dn_class_logits": dec_logits[:, :, :split] if split else None,
+            "dn_boxes": dec_boxes[:, :, :split] if split else None,
         }
-    
