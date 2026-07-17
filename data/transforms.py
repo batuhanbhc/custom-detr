@@ -112,25 +112,28 @@ def zoom_out(image, target):
     return out, target
 
 
-def random_iou_crop(image, target, trials=40):
+def random_iou_crop(image, target, trials=40, filter_mode="min_visibility", min_visibility=0.1):
     boxes = target["boxes"]
     if not len(boxes): return image, target
     options = (0.0, 0.1, 0.3, 0.5, 0.7, 0.9, None)
     threshold = random.choice(options)
     if threshold is None: return image, target
+    area = (boxes[:, 2:] - boxes[:, :2]).prod(1)
     for _ in range(trials):
         w = random.uniform(0.3, 1.0) * image.width; h = random.uniform(0.3, 1.0) * image.height
         if not 0.5 <= w / h <= 2.0: continue
         left = random.uniform(0, image.width - w); top = random.uniform(0, image.height - h)
         crop = torch.tensor([left, top, left + w, top + h])
-        centers = (boxes[:, :2] + boxes[:, 2:]) / 2
-        keep = ((centers > crop[:2]) & (centers < crop[2:])).all(1)
-        if not keep.any(): continue
-        inter_lt = torch.maximum(boxes[keep, :2], crop[:2]); inter_rb = torch.minimum(boxes[keep, 2:], crop[2:])
+        inter_lt = torch.maximum(boxes[:, :2], crop[:2]); inter_rb = torch.minimum(boxes[:, 2:], crop[2:])
         inter = (inter_rb - inter_lt).clamp(min=0).prod(1)
-        area = (boxes[keep, 2:] - boxes[keep, :2]).prod(1)
+        if filter_mode == "center":
+            centers = (boxes[:, :2] + boxes[:, 2:]) / 2
+            keep = ((centers > crop[:2]) & (centers < crop[2:])).all(1)
+        else:
+            keep = (inter / area.clamp(min=1e-7)) > min_visibility
+        if not keep.any(): continue
         crop_area = w * h
-        if (inter / (area + crop_area - inter)).max() < threshold: continue
+        if (inter[keep] / (area[keep] + crop_area - inter[keep])).max() < threshold: continue
         target = clone_target(target)
         target["boxes"], target["labels"] = boxes[keep] - torch.tensor([left, top, left, top]), target["labels"][keep]
         return image.crop((round(left), round(top), round(left + w), round(top + h))), sanitize(target, round(w), round(h))
@@ -140,7 +143,12 @@ def random_iou_crop(image, target, trials=40):
 def final_transform(image, target, size=640, strong=True, cfg=None, augment=True):
     if strong and random.random() < cfg.photometric_prob: image = photometric(image)
     if strong and random.random() < cfg.zoom_out_prob: image, target = zoom_out(image, target)
-    if strong and random.random() < cfg.iou_crop_prob: image, target = random_iou_crop(image, target)
+    if strong and random.random() < cfg.iou_crop_prob:
+        image, target = random_iou_crop(
+            image, target,
+            filter_mode=cfg.iou_crop_filter,
+            min_visibility=cfg.iou_crop_min_visibility,
+        )
     if augment and random.random() < cfg.horizontal_flip_prob:
         image = F.hflip(image); boxes = target["boxes"].clone()
         boxes[:, [0, 2]] = image.width - boxes[:, [2, 0]]; target["boxes"] = boxes

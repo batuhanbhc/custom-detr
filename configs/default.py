@@ -26,6 +26,8 @@ mixup_alpha = 1.5
 photometric_prob = 0.5
 zoom_out_prob = 0.5
 iou_crop_prob = 0.8
+iou_crop_filter = "min_visibility"  # "min_visibility" or "center"
+iou_crop_min_visibility = 0.1
 horizontal_flip_prob = 0.5
 min_box_size = 1.0
 
