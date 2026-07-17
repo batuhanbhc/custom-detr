@@ -1,9 +1,35 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .attention import MultiHeadSelfAttention, MultiScaleDeformableAttention
 from .norm import LayerNorm
 from .mlp import MLP
-    
+
+
+class SwiGLUFFN(nn.Module):
+    """DEIMv2-faithful SwiGLU FFN (engine/deim/deim_utils.py), itself taken from
+    Meta's DINOv2. Hidden dim is half of the vanilla dim_feedforward, not the
+    2/3-param-matching convention some other SwiGLU variants use."""
+
+    def __init__(self, d_model, dim_feedforward, dropout=0.0):
+        super().__init__()
+        hidden_dim = dim_feedforward // 2
+        self.w12 = nn.Linear(d_model, 2 * hidden_dim)
+        self.w3 = nn.Linear(hidden_dim, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.w12.weight)
+        nn.init.constant_(self.w12.bias, 0)
+        nn.init.xavier_uniform_(self.w3.weight)
+        nn.init.constant_(self.w3.bias, 0)
+
+    def forward(self, x):
+        x1, x2 = self.w12(x).chunk(2, dim=-1)
+        return self.w3(self.dropout(F.silu(x1) * x2))
+
+
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, num_levels, k_list, num_class, box_mlp=None, layer_embeddings=None, expansion=4.0, pre_norm = True, ffn_dropout=0.0, msa_dropout=0.0):
         super().__init__()
@@ -18,12 +44,7 @@ class DecoderLayer(nn.Module):
         )
 
         hidden_dim = int(d_model * expansion)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(p=ffn_dropout),
-            nn.Linear(hidden_dim, d_model)
-        )
+        self.ffn = SwiGLUFFN(d_model, hidden_dim, ffn_dropout)
         
         self.norm_1 = LayerNorm(d_model)
         self.norm_2 = LayerNorm(d_model)
