@@ -9,7 +9,7 @@ except ImportError:
     tqdm = None
 import configs.default as cfg
 from data import CocoDetectionDataset, collate_fn
-from engine.optim import build_optimizer, build_scheduler
+from engine.optim import build_optimizer, build_scheduler, set_warmup_lr
 from engine.evaluate import evaluate_loss, coco_evaluate
 from loss import HungarianMatcher, SetCriterion
 from model import CustomDETR
@@ -54,6 +54,25 @@ def print_model_summary(model):
         f"parameter+buffer size={format_size(parameter_bytes + buffer_bytes)}"
     )
 
+
+def image_ids(targets):
+    return [int(t['image_id'].item()) for t in targets]
+
+
+def all_finite(value):
+    if torch.is_tensor(value):
+        return not value.is_floating_point() or bool(torch.isfinite(value).all())
+    if isinstance(value, dict): return all(all_finite(v) for v in value.values())
+    if isinstance(value, (list, tuple)): return all(all_finite(v) for v in value)
+    return True
+
+
+def save_checkpoint(path, model, optimizer, scheduler, epoch, batch_index, global_update, epoch_complete):
+    torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(), 'epoch': epoch, 'batch_index': batch_index,
+                'global_update': global_update, 'epoch_complete': epoch_complete,
+                'config': {k: str(v) for k, v in vars(cfg).items() if not k.startswith('_')}}, path)
+
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--resume", default=cfg.resume); parser.add_argument("--device", default=cfg.device)
     args = parser.parse_args(); device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -75,22 +94,49 @@ def main():
     criterion = SetCriterion(cfg.num_class, matcher, {"loss_mal": cfg.loss_mal_weight, "loss_bbox": cfg.loss_bbox_weight, "loss_giou": cfg.loss_giou_weight}, cfg.mal_alpha, cfg.mal_gamma, cfg.aux_loss)
     optimizer, scheduler = build_optimizer(model, cfg), None; scheduler = build_scheduler(optimizer, cfg)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.amp and device.type == "cuda")
-    start = 0; out = Path(cfg.output_dir); out.mkdir(parents=True, exist_ok=True)
+    start = 0; resume_batch = 0; global_update = 0
+    out = Path(cfg.output_dir); out.mkdir(parents=True, exist_ok=True)
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False); model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"]); scheduler.load_state_dict(checkpoint["scheduler"]); start = checkpoint["epoch"] + 1
-        print(f"Resumed from {args.resume} at epoch {start + 1}/{cfg.epochs}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False); model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer']); scheduler.load_state_dict(checkpoint['scheduler'])
+        complete = checkpoint.get('epoch_complete', True)
+        start = checkpoint['epoch'] + int(complete)
+        resume_batch = 0 if complete else checkpoint.get('batch_index', 0)
+        global_update = checkpoint.get('global_update', start * len(train_loader))
+        print(f'Resumed from {args.resume} at epoch {start + 1}/{cfg.epochs}, batch {resume_batch + 1:,}')
     for epoch in range(start, cfg.epochs):
         train_set.set_epoch(epoch); model.train(); running = 0.0
         batches = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.epochs}", unit="batch", dynamic_ncols=True) if tqdm else train_loader
         if tqdm is None:
             print(f"Epoch {epoch + 1}/{cfg.epochs}: training {len(train_loader):,} batches (install tqdm for a progress bar)")
         for batch_index, (images, targets) in enumerate(batches, start=1):
+            if epoch == start and batch_index <= resume_batch: continue
             images, targets = images.to(device, non_blocking=True), move_targets(targets, device); optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device.type, enabled=scaler.is_enabled()):
-                losses = criterion(model(images, targets), targets); loss = sum(losses.values())
-            scaler.scale(loss).backward(); scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)
-            scaler.step(optimizer); scaler.update(); running += loss.item()
+                outputs = model(images, targets)
+            if not all_finite(outputs) or not all_finite(targets):
+                print(f'WARNING: skipped non-finite batch {batch_index:,}; image_ids={image_ids(targets)}')
+                continue
+            try:
+                losses = criterion(outputs, targets); loss = sum(losses.values())
+            except FloatingPointError as exc:
+                print(f'WARNING: skipped batch {batch_index:,}: {exc}; image_ids={image_ids(targets)}')
+                continue
+            if not torch.isfinite(loss):
+                print(f'WARNING: skipped non-finite loss at batch {batch_index:,}; image_ids={image_ids(targets)}')
+                continue
+            if global_update <= cfg.warmup_updates:
+                set_warmup_lr(optimizer, global_update, cfg.warmup_updates, cfg.lr, cfg.backbone_lr)
+            scaler.scale(loss).backward(); scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)
+            if not torch.isfinite(grad_norm):
+                print(f'WARNING: optimizer step skipped for non-finite gradients at batch {batch_index:,}')
+            scaler.step(optimizer); scaler.update()
+            if torch.isfinite(grad_norm): global_update += 1
+            running += loss.item()
+            if cfg.checkpoint_interval_updates > 0 and global_update > 0 and global_update % cfg.checkpoint_interval_updates == 0:
+                save_checkpoint(out / 'last.pt', model, optimizer, scheduler, epoch, batch_index,
+                                global_update, epoch_complete=False)
             if tqdm:
                 main_lr = next(g["lr"] for g in optimizer.param_groups if not g["is_backbone"])
                 backbone_lr = next(g["lr"] for g in optimizer.param_groups if g["is_backbone"])
@@ -106,7 +152,8 @@ def main():
                "lr": [g["lr"] for g in optimizer.param_groups]}
         if coco_stats is not None: log["coco_ap"] = coco_stats[:6]
         print("Epoch summary: " + json.dumps(log))
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "epoch": epoch, "config": {k: str(v) for k, v in vars(cfg).items() if not k.startswith("_")}}, out / "last.pt")
+        save_checkpoint(out / 'last.pt', model, optimizer, scheduler, epoch, len(train_loader),
+                        global_update, epoch_complete=True)
         print(f"Checkpoint saved to {out / 'last.pt'}")
         base_lrs = [g["lr"] for g in optimizer.param_groups if not g["is_backbone"]]
         if min(base_lrs) <= cfg.min_lr: print("minimum learning rate reached; stopping"); break

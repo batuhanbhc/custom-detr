@@ -13,7 +13,9 @@ class HungarianMatcher(nn.Module):
     def forward(self, outputs, targets):
         results = []
         for logits, boxes, target in zip(outputs["pred_logits"], outputs["pred_boxes"], targets):
-            labels, target_boxes = target["labels"], target["boxes"]
+            # Matching is numerically sensitive and does not benefit from AMP.
+            logits, boxes = logits.float(), boxes.float()
+            labels, target_boxes = target["labels"], target["boxes"].float()
             if not len(labels):
                 empty = torch.empty(0, dtype=torch.long, device=boxes.device); results.append((empty, empty)); continue
             prob = logits.sigmoid()
@@ -23,6 +25,9 @@ class HungarianMatcher(nn.Module):
             bbox_cost = torch.cdist(boxes, target_boxes, p=1)
             giou_cost = -generalized_box_iou(cxcywh_to_xyxy(boxes), cxcywh_to_xyxy(target_boxes))
             cost = self.class_cost * class_cost + self.bbox_cost * bbox_cost + self.giou_cost * giou_cost
-            i, j = linear_sum_assignment(cost.detach().cpu())
+            cost = cost.detach().cpu()
+            if not torch.isfinite(cost).all():
+                raise FloatingPointError('non-finite Hungarian cost')
+            i, j = linear_sum_assignment(cost)
             results.append((torch.as_tensor(i, device=boxes.device), torch.as_tensor(j, device=boxes.device)))
         return results

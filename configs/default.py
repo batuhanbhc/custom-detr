@@ -12,8 +12,8 @@ val_images = data_root / "val2017"
 train_annotations = data_root / "annotations/instances_train2017.json"
 val_annotations = data_root / "annotations/instances_val2017.json"
 img_size = 640
-batch_size = 4
-num_workers = 4
+batch_size = 2
+num_workers = 2
 num_class = 80
 
 # Augmentation (DEIM-style, mosaic/mixup precede the single-image pipeline)
@@ -76,7 +76,9 @@ backbone_lr = 2e-5
 weight_decay = 1e-4
 betas = (0.9, 0.999)
 grad_clip_norm = 0.1
-amp = True
+amp = False
+warmup_updates = 2000
+checkpoint_interval_updates = 2000
 plateau_factor = 0.5
 plateau_patience = 3
 plateau_threshold = 1e-3

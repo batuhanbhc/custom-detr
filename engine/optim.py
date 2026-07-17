@@ -16,6 +16,13 @@ def build_optimizer(model, cfg):
     return torch.optim.AdamW(param_groups, betas=cfg.betas)
 
 
+def set_warmup_lr(optimizer, update, warmup_updates, lr, backbone_lr):
+    '''Linearly scale learning rates from zero over optimizer updates.'''
+    scale = 1.0 if warmup_updates <= 0 else min(update / warmup_updates, 1.0)
+    for group in optimizer.param_groups:
+        group['lr'] = (backbone_lr if group['is_backbone'] else lr) * scale
+
+
 def build_scheduler(optimizer, cfg):
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=cfg.plateau_factor, patience=cfg.plateau_patience,

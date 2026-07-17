@@ -18,15 +18,14 @@ class MultiHeadSelfAttention(nn.Module):
         self.k_proj = nn.Linear(self.d_model, self.d_model)
         self.v_proj = nn.Linear(self.d_model, self.d_model) 
         self.out_proj = nn.Linear(self.d_model, self.d_model)
-        self.attn_dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, pos=None, key_padding_mask=None, attn_mask=None):
         # Assuming x is of shape [batch_size, seq, d_model]
-        # Assuming pos is of shape [seq, d_model]
+        # pos may be shared [seq, d_model] or batched [batch, seq, d_model].
         # Assuming key_padding_mask is of shape [batch_size, seq]
 
         batch_size, seq, _ = x.size()
-        if pos is not None:
+        if pos is not None and pos.dim() == 2:
             pos = pos.unsqueeze(0)  # [1, seq, d_model]
 
         qk_input = x + pos if pos is not None else x
@@ -39,28 +38,28 @@ class MultiHeadSelfAttention(nn.Module):
         k = k.view(batch_size, seq, self.num_heads, self.d_k).transpose(1,2) # [batch_size, num_heads, seq, d_k]
         v = v.view(batch_size, seq, self.num_heads, self.d_k).transpose(1,2) # [batch_size, num_heads, seq, d_k]
 
-        attn_logits = q @ k.transpose(-2, -1) / (self.d_k ** 0.5)  # [batch_size, num_heads, seq, seq]
-        
+        # SDPA selects PyTorch's numerically stable fused implementation when
+        # available. Its boolean mask uses True=allowed, the inverse of the
+        # project's existing True=blocked masks.
+        allowed_mask = None
         if key_padding_mask is not None:
-            attn_logits = attn_logits.masked_fill(
-                key_padding_mask[:, None, None, :],
-                float("-inf"),
-            )
+            allowed_mask = ~key_padding_mask[:, None, None, :]
 
         if attn_mask is not None:
             if attn_mask.dim() == 2:
                 attn_mask = attn_mask[None, None, :, :]
             elif attn_mask.dim() == 3:
                 attn_mask = attn_mask[:, None, :, :]
+            attention_allowed = ~attn_mask
+            allowed_mask = attention_allowed if allowed_mask is None else allowed_mask & attention_allowed
 
-            attn_logits = attn_logits.masked_fill(
-                attn_mask,
-                float("-inf"),
-            )
-
-        attn = self.attn_dropout(F.softmax(attn_logits, dim=-1))
-
-        out = attn @ v
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=allowed_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
         out = out.transpose(1,2).reshape(batch_size, seq, self.d_model)
         return self.out_proj(out)
     
