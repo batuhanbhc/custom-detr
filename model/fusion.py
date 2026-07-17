@@ -4,6 +4,8 @@ from torch.nn.utils.fusion import fuse_conv_bn_eval
 import torch.nn.functional as F
 import copy
 
+from .norm import BatchNorm2d
+
 class ConvBatchAct(nn.Module):
     def __init__(
         self,
@@ -27,7 +29,7 @@ class ConvBatchAct(nn.Module):
             padding,
             bias=bias,
         )
-        self.bn = nn.BatchNorm2d(out_channels)
+        self.bn = BatchNorm2d(out_channels)
         self.act = nn.SiLU()
 
     def forward(self, x):
@@ -58,7 +60,7 @@ class RepVGG(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn_3x3 = nn.BatchNorm2d(out_channels)
+        self.bn_3x3 = BatchNorm2d(out_channels)
 
         self.conv_1x1 = nn.Conv2d(
             in_channels,
@@ -68,7 +70,7 @@ class RepVGG(nn.Module):
             padding=0,
             bias=False,
         )
-        self.bn_1x1 = nn.BatchNorm2d(out_channels)
+        self.bn_1x1 = BatchNorm2d(out_channels)
 
         self.act = nn.SiLU()
         self.reparam_conv = None

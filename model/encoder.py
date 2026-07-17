@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from .attention import MultiHeadSelfAttention
-from .norm import LayerNorm
+from .norm import LayerNorm, BatchNorm2d
 from .fusion import SimpleELAN
 from .pos_embed import build_2d_sin_cos_embed
 
@@ -84,28 +84,28 @@ class HybridEncoder(nn.Module):
 
         self.lateral_proj_1 = nn.Sequential(
             nn.Conv2d(512, d_model, 1, bias=False),
-            nn.BatchNorm2d(d_model),
+            BatchNorm2d(d_model),
         )
         self.lateral_proj_2 = nn.Sequential(
             nn.Conv2d(1024, d_model, 1, bias=False),
-            nn.BatchNorm2d(d_model),
+            BatchNorm2d(d_model),
         )
         self.lateral_proj_3 = nn.Sequential(
             nn.Conv2d(2048, d_model, 1, bias=False),
-            nn.BatchNorm2d(d_model),
+            BatchNorm2d(d_model),
         )
 
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
         self.downsample_1 = nn.Sequential(
             nn.Conv2d(d_model, d_model, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(d_model),
+            BatchNorm2d(d_model),
             nn.SiLU(),
         )
 
         self.downsample_2 = nn.Sequential(
             nn.Conv2d(d_model, d_model, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(d_model),
+            BatchNorm2d(d_model),
             nn.SiLU(),
         )
 
