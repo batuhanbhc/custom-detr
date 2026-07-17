@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -87,6 +89,38 @@ class MultiScaleDeformableAttention(nn.Module):
         self.offset_head = nn.Linear(d_model, num_heads * self.total_k * 2)
         self.attn_head = nn.Linear(d_model, num_heads * self.total_k)
         self.out_proj = nn.Linear(d_model, d_model)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        # Deformable DETR init: zero the offset weights, then bias each head
+        # towards a unique direction around the reference point, with the
+        # k-th sample point (1-indexed) placed k times farther out along that
+        # direction. The forward pass divides by each level's own k_i and
+        # scales by half the box width/height, so a raw magnitude of k_i
+        # (the farthest point on that level) lands at the box's edge.
+        nn.init.constant_(self.offset_head.weight, 0.0)
+
+        thetas = torch.arange(self.num_heads, dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
+        directions = torch.stack([thetas.cos(), thetas.sin()], dim=-1)  # [heads, 2]
+        directions = directions / directions.abs().max(dim=-1, keepdim=True)[0]  # [heads, 2]
+
+        level_biases = []
+        for k in self.k_list:
+            magnitudes = torch.arange(1, k + 1, dtype=torch.float32).view(1, k, 1)  # [1, k, 1]
+            level_biases.append(directions.view(self.num_heads, 1, 2) * magnitudes)  # [heads, k, 2]
+        offset_bias = torch.cat(level_biases, dim=1)  # [heads, total_k, 2]
+
+        with torch.no_grad():
+            self.offset_head.bias.copy_(offset_bias.reshape(-1))
+
+        nn.init.constant_(self.attn_head.weight, 0.0)
+        nn.init.constant_(self.attn_head.bias, 0.0)
+
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.constant_(self.value_proj.bias, 0.0)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        nn.init.constant_(self.out_proj.bias, 0.0)
 
     def forward(self, tgt, query_pos, memory, reference_boxes, spatial_sizes, level_start_index):
         b, num_queries, _ = tgt.size()
