@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from .transforms import final_transform, mosaic, mixup
+from .transforms import final_transform, mosaic
 
 
 class CocoDetectionDataset(Dataset):
@@ -47,8 +47,6 @@ class CocoDetectionDataset(Dataset):
     def __getitem__(self, index):
         strong = self.train and self.epoch < self.cfg.strong_aug_stop_epoch
         sample = self._composite(index, strong)
-        if strong and random.random() < self.cfg.mixup_prob:
-            sample = mixup(sample, self._composite(random.randrange(len(self)), strong), self.cfg.mixup_alpha)
         image_id = self.images[index]["id"]
         image, target = final_transform(*sample, self.cfg.img_size, strong, self.cfg, augment=self.train)
         target["image_id"] = torch.tensor(image_id)
@@ -59,3 +57,29 @@ class CocoDetectionDataset(Dataset):
 def collate_fn(batch):
     images, targets = zip(*batch)
     return torch.stack(images), list(targets)
+
+
+class MixupCollate:
+    """Batch-level mixup, DEIM-style: one shared decision and blend factor per
+    batch, mixed with the circularly-shifted batch rather than a fresh sample."""
+
+    def __init__(self, cfg):
+        self.mixup_prob = cfg.mixup_prob
+        self.stop_epoch = cfg.strong_aug_stop_epoch
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __call__(self, batch):
+        images, targets = collate_fn(batch)
+        if self.epoch < self.stop_epoch and random.random() < self.mixup_prob:
+            beta = round(random.uniform(0.45, 0.55), 6)
+            shifted_images = images.roll(shifts=1, dims=0)
+            images = shifted_images.mul_(1.0 - beta).add_(images.mul(beta))
+            shifted_targets = targets[-1:] + targets[:-1]
+            targets = [
+                {**t, "boxes": torch.cat((t["boxes"], s["boxes"])), "labels": torch.cat((t["labels"], s["labels"]))}
+                for t, s in zip(targets, shifted_targets)
+            ]
+        return images, targets

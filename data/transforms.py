@@ -56,20 +56,6 @@ def mosaic(samples, short=320, scale_range=(0.8, 1.2), translate=(0.1, 0.1)):
     return out, sanitize(target, *out.size)
 
 
-def mixup(a, b, alpha=1.5):
-    image1, target1 = a
-    image2, target2 = b
-    if image2.size != image1.size:
-        sx, sy = image1.width / image2.width, image1.height / image2.height
-        image2 = image2.resize(image1.size, Image.Resampling.BILINEAR)
-        target2 = clone_target(target2)
-        target2["boxes"] *= torch.tensor([sx, sy, sx, sy])
-    lam = random.betavariate(alpha, alpha)
-    image = Image.blend(image1, image2, 1 - lam)
-    return image, {"boxes": torch.cat((target1["boxes"], target2["boxes"])),
-                   "labels": torch.cat((target1["labels"], target2["labels"]))}
-
-
 def hue_jitter(image, factor):
     h, s, v = image.convert("HSV").split()
     h_arr = (np.array(h, dtype=np.int16) + round(factor * 255)) % 256
@@ -157,4 +143,5 @@ def final_transform(image, target, size=640, strong=True, cfg=None, augment=True
     target["boxes"] *= torch.tensor([size / ow, size / oh, size / ow, size / oh])
     target = sanitize(target, size, size, cfg.min_box_size)
     target["boxes"] = xyxy_to_cxcywh(target["boxes"]) / size
-    return F.to_tensor(image), target
+    image = F.normalize(F.to_tensor(image), mean=list(cfg.image_mean), std=list(cfg.image_std))
+    return image, target

@@ -8,7 +8,7 @@ try:
 except ImportError:
     tqdm = None
 import configs.default as cfg
-from data import CocoDetectionDataset, collate_fn
+from data import CocoDetectionDataset, collate_fn, MixupCollate
 from engine.optim import build_optimizer, build_scheduler, set_warmup_lr
 from engine.evaluate import evaluate_loss, coco_evaluate
 from loss import HungarianMatcher, SetCriterion
@@ -80,8 +80,9 @@ def main():
     data_cfg = snapshot_config(cfg)
     train_set = CocoDetectionDataset(cfg.train_images, cfg.train_annotations, data_cfg, True)
     val_set = CocoDetectionDataset(cfg.val_images, cfg.val_annotations, data_cfg, False)
+    train_collate = MixupCollate(data_cfg)
     train_loader = DataLoader(train_set, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, drop_last=True,
-                              collate_fn=collate_fn, pin_memory=True, worker_init_fn=seed_worker)
+                              collate_fn=train_collate, pin_memory=True, worker_init_fn=seed_worker)
     val_loader = DataLoader(val_set, cfg.batch_size, num_workers=cfg.num_workers, collate_fn=collate_fn,
                             pin_memory=True, worker_init_fn=seed_worker)
     print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
@@ -105,7 +106,7 @@ def main():
         global_update = checkpoint.get('global_update', start * len(train_loader))
         print(f'Resumed from {args.resume} at epoch {start + 1}/{cfg.epochs}, batch {resume_batch + 1:,}')
     for epoch in range(start, cfg.epochs):
-        train_set.set_epoch(epoch); model.train(); running = 0.0
+        train_set.set_epoch(epoch); train_collate.set_epoch(epoch); model.train(); running = 0.0
         batches = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.epochs}", unit="batch", dynamic_ncols=True) if tqdm else train_loader
         if tqdm is None:
             print(f"Epoch {epoch + 1}/{cfg.epochs}: training {len(train_loader):,} batches (install tqdm for a progress bar)")

@@ -22,7 +22,6 @@ mosaic_short_side = 320
 mosaic_scale = (0.8, 1.2)
 mosaic_translate = (0.1, 0.1)
 mixup_prob = 0.5
-mixup_alpha = 1.5
 photometric_prob = 0.5
 zoom_out_prob = 0.5
 iou_crop_prob = 0.8
@@ -30,6 +29,8 @@ iou_crop_filter = "min_visibility"  # "min_visibility" or "center"
 iou_crop_min_visibility = 0.1
 horizontal_flip_prob = 0.5
 min_box_size = 1.0
+image_mean = (0.485, 0.456, 0.406)
+image_std = (0.229, 0.224, 0.225)
 
 # Two-phase schedule
 epochs = 60
